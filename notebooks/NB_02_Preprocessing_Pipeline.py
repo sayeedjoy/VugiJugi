@@ -27,13 +27,41 @@ df = pd.read_parquet(os.path.join(DATA_DIR, "clean.parquet"))
 print(f"Loaded clean data: {df.shape}")
 
 # ── Cell 3 ── Separate features (X) and target (y) ─────────────────────────
-# Drop non-feature columns
-drop_cols = ["SepsisLabel"]
-if "patient_id" in df.columns:
-    drop_cols.append("patient_id")
-
-X = df.drop(columns=drop_cols)
+# Keep target separately.
 y = df["SepsisLabel"]
+has_patient_id = "patient_id" in df.columns
+
+if has_patient_id:
+    # Split by patient to prevent train/test leakage across repeated time rows.
+    patient_df = (
+        df.groupby("patient_id", as_index=False)["SepsisLabel"]
+        .max()
+        .rename(columns={"SepsisLabel": "patient_label"})
+    )
+    train_patients, test_patients = train_test_split(
+        patient_df["patient_id"],
+        test_size=0.20,
+        random_state=42,
+        stratify=patient_df["patient_label"],
+    )
+    train_mask = df["patient_id"].isin(train_patients)
+    test_mask = df["patient_id"].isin(test_patients)
+
+    drop_cols = ["SepsisLabel", "patient_id"]
+    X = df.drop(columns=drop_cols)
+    X_train = df.loc[train_mask].drop(columns=drop_cols)
+    X_test = df.loc[test_mask].drop(columns=drop_cols)
+    y_train = y.loc[train_mask]
+    y_test = y.loc[test_mask]
+else:
+    drop_cols = ["SepsisLabel"]
+    X = df.drop(columns=drop_cols)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y,
+        test_size=0.20,
+        random_state=42,
+        stratify=y,
+    )
 
 feature_names = list(X.columns)
 print(f"\nFeatures ({X.shape[1]}): {feature_names}")
@@ -47,12 +75,11 @@ pd.Series(feature_names).to_csv(
 )
 
 # ── Cell 4 ── Stratified 80/20 train-test split ────────────────────────────
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y,
-    test_size=0.20,
-    random_state=42,
-    stratify=y,
-)
+if has_patient_id:
+    print(
+        f"\nPatient-level split: {train_patients.nunique()} train patients | "
+        f"{test_patients.nunique()} test patients"
+    )
 
 print(f"\nTrain: {X_train.shape}  |  Test: {X_test.shape}")
 print(f"Train target distribution:\n{y_train.value_counts()}")
@@ -78,6 +105,9 @@ print(f"  Train class distribution: {dict(zip(*np.unique(y_train_res, return_cou
 print(f"  Train shape: {X_train_res.shape}")
 
 # ── Cell 7 ── Save all arrays and scaler ────────────────────────────────────
+np.save(os.path.join(DATA_DIR, "X_train_pre_smote.npy"), X_train_scaled)
+np.save(os.path.join(DATA_DIR, "y_train_pre_smote.npy"), y_train.values)
+
 np.save(os.path.join(DATA_DIR, "X_train.npy"), X_train_res)
 np.save(os.path.join(DATA_DIR, "X_test.npy"),  X_test_scaled)
 np.save(os.path.join(DATA_DIR, "y_train.npy"), y_train_res)

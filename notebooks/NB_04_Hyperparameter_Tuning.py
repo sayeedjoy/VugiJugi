@@ -19,6 +19,8 @@ import pandas as pd
 import optuna
 
 from sklearn.model_selection import GridSearchCV, cross_val_score
+from imblearn.over_sampling import SMOTE
+from imblearn.pipeline import Pipeline
 
 warnings.filterwarnings("ignore")
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -31,9 +33,22 @@ RESULTS_DIR = os.path.join(THESIS_DIR, "results")
 os.makedirs(os.path.join(MODELS_DIR, "tuned"), exist_ok=True)
 
 # ── Cell 3 ── Load preprocessed data ───────────────────────────────────────
-X_train = np.load(os.path.join(DATA_DIR, "X_train.npy"))
+# Use pre-SMOTE train split so CV can apply SMOTE inside each fold only.
+pre_x_path = os.path.join(DATA_DIR, "X_train_pre_smote.npy")
+pre_y_path = os.path.join(DATA_DIR, "y_train_pre_smote.npy")
+if os.path.exists(pre_x_path) and os.path.exists(pre_y_path):
+    X_train = np.load(pre_x_path)
+    y_train = np.load(pre_y_path)
+else:
+    print(
+        "WARNING: pre-SMOTE train arrays not found. "
+        "Using X_train.npy/y_train.npy can leak information in CV. "
+        "Rerun NB-02 to regenerate *_pre_smote.npy files."
+    )
+    X_train = np.load(os.path.join(DATA_DIR, "X_train.npy"))
+    y_train = np.load(os.path.join(DATA_DIR, "y_train.npy"))
+
 X_test  = np.load(os.path.join(DATA_DIR, "X_test.npy"))
-y_train = np.load(os.path.join(DATA_DIR, "y_train.npy"))
 y_test  = np.load(os.path.join(DATA_DIR, "y_test.npy"))
 
 print(f"X_train: {X_train.shape}  y_train: {y_train.shape}")
@@ -153,6 +168,9 @@ gridsearch_configs = {
     },
 }
 
+for config in gridsearch_configs.values():
+    config["param_grid"] = {f"model__{k}": v for k, v in config["param_grid"].items()}
+
 # ── Cell 7 ── Run GridSearchCV for sklearn models ──────────────────────────
 all_best_params = {}
 tuned_results = []
@@ -163,8 +181,12 @@ for name, config in gridsearch_configs.items():
     print(f"{'=' * 55}")
 
     start = time.time()
+    tune_pipeline = Pipeline([
+        ("smote", SMOTE(random_state=42)),
+        ("model", config["estimator"]),
+    ])
     gs = GridSearchCV(
-        estimator=config["estimator"],
+        estimator=tune_pipeline,
         param_grid=config["param_grid"],
         cv=5,
         scoring="f1_weighted",
@@ -190,8 +212,10 @@ for name, config in gridsearch_configs.items():
     print(f"  Best params: {gs.best_params_}")
     print(f"  F1 Weighted: {f1_w:.4f}  |  ROC AUC: {roc:.4f}  |  Time: {tune_time:.0f}s")
 
-    all_best_params[name] = {k: (v if not isinstance(v, np.generic) else v.item())
-                              for k, v in gs.best_params_.items()}
+    all_best_params[name] = {
+        k.replace("model__", "", 1): (v if not isinstance(v, np.generic) else v.item())
+        for k, v in gs.best_params_.items()
+    }
 
     tuned_results.append({
         "Model": name, "Accuracy": round(acc, 4),
@@ -217,7 +241,11 @@ def optuna_lgbm(trial):
         "random_state": 42, "n_jobs": -1, "verbose": -1,
     }
     model = LGBMClassifier(**params)
-    scores = cross_val_score(model, X_train, y_train, cv=5,
+    cv_pipeline = Pipeline([
+        ("smote", SMOTE(random_state=42)),
+        ("model", model),
+    ])
+    scores = cross_val_score(cv_pipeline, X_train, y_train, cv=5,
                              scoring="f1_weighted", n_jobs=-1)
     return scores.mean()
 
@@ -234,7 +262,11 @@ def optuna_xgb(trial):
         "use_label_encoder": False, "eval_metric": "logloss",
     }
     model = XGBClassifier(**params)
-    scores = cross_val_score(model, X_train, y_train, cv=5,
+    cv_pipeline = Pipeline([
+        ("smote", SMOTE(random_state=42)),
+        ("model", model),
+    ])
+    scores = cross_val_score(cv_pipeline, X_train, y_train, cv=5,
                              scoring="f1_weighted", n_jobs=-1)
     return scores.mean()
 
@@ -248,7 +280,11 @@ def optuna_catboost(trial):
         "random_state": 42, "verbose": 0,
     }
     model = CatBoostClassifier(**params)
-    scores = cross_val_score(model, X_train, y_train, cv=5,
+    cv_pipeline = Pipeline([
+        ("smote", SMOTE(random_state=42)),
+        ("model", model),
+    ])
+    scores = cross_val_score(cv_pipeline, X_train, y_train, cv=5,
                              scoring="f1_weighted", n_jobs=-1)
     return scores.mean()
 
@@ -281,7 +317,10 @@ for name, (objective_fn, ModelClass) in optuna_configs.items():
     elif name == "CatBoost":
         fixed.update({"verbose": 0})
 
-    best_model = ModelClass(**best_params, **fixed)
+    best_model = Pipeline([
+        ("smote", SMOTE(random_state=42)),
+        ("model", ModelClass(**best_params, **fixed)),
+    ])
     best_model.fit(X_train, y_train)
 
     y_pred = best_model.predict(X_test)
