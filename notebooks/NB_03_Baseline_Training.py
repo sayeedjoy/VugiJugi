@@ -47,10 +47,16 @@ from sklearn.ensemble import (
     ExtraTreesClassifier,
     HistGradientBoostingClassifier,
 )
-from sklearn.svm import SVC
+from sklearn.linear_model import SGDClassifier
+from sklearn.calibration import CalibratedClassifierCV
 from lightgbm import LGBMClassifier
 from xgboost import XGBClassifier
 from catboost import CatBoostClassifier
+
+# Linear SVM via SGD — orders of magnitude faster than SVC(kernel='rbf')
+# CalibratedClassifierCV adds predict_proba support needed for ROC-AUC
+_svm_base = SGDClassifier(loss="hinge", max_iter=1000, tol=1e-3,
+                          random_state=42, n_jobs=-1)
 
 models = {
     "MLP":                  MLPClassifier(max_iter=300, random_state=42),
@@ -66,7 +72,7 @@ models = {
                                           use_label_encoder=False, eval_metric="logloss"),
     "CatBoost":             CatBoostClassifier(random_state=42, verbose=0),
     "ExtraTrees":           ExtraTreesClassifier(random_state=42, n_jobs=-1),
-    "SVM":                  SVC(random_state=42, probability=True),
+    "SVM":                  CalibratedClassifierCV(_svm_base, cv=3),
 }
 
 print(f"\nTotal models to train: {len(models)}")
