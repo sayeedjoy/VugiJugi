@@ -11,7 +11,7 @@
 from google.colab import drive
 drive.mount('/content/drive')
 
-import os, warnings, joblib
+import os, time, warnings, joblib
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import VotingClassifier
@@ -28,12 +28,16 @@ MODELS_DIR  = os.path.join(THESIS_DIR, "models")
 RESULTS_DIR = os.path.join(THESIS_DIR, "results")
 
 # ── Cell 3 ── Load data ────────────────────────────────────────────────────
-X_train = np.load(os.path.join(DATA_DIR, "X_train.npy"))
+# Load pre-SMOTE train arrays. The tuned models saved by NB-04 are
+# imblearn.Pipeline([SMOTE, model]), so SMOTE runs inside VotingClassifier.fit().
+# Using the post-SMOTE X_train.npy here would cause double SMOTE on an already-
+# balanced dataset, skewing the class distribution.
+X_train = np.load(os.path.join(DATA_DIR, "X_train_pre_smote.npy"))
 X_test  = np.load(os.path.join(DATA_DIR, "X_test.npy"))
-y_train = np.load(os.path.join(DATA_DIR, "y_train.npy"))
+y_train = np.load(os.path.join(DATA_DIR, "y_train_pre_smote.npy"))
 y_test  = np.load(os.path.join(DATA_DIR, "y_test.npy"))
 
-print(f"X_train: {X_train.shape}  X_test: {X_test.shape}")
+print(f"X_train (pre-SMOTE): {X_train.shape}  X_test: {X_test.shape}")
 
 # ── Cell 4 ── Load tuned results and rank models ──────────────────────────
 tuned_df = pd.read_csv(os.path.join(RESULTS_DIR, "tuned_results.csv"))
@@ -118,9 +122,11 @@ voting_hard = VotingClassifier(
     voting="hard",
     n_jobs=-1,
 )
+start = time.time()
 voting_hard.fit(X_train, y_train)
+print(f"  Fit time: {time.time() - start:.0f}s")
 hard_metrics = evaluate_model(voting_hard, X_test, y_test, "Voting_Hard")
-print(f"  F1 Weighted: {hard_metrics['F1_Weighted']}")
+print(f"  F1 Weighted: {hard_metrics['F1_Weighted']}  |  ROC AUC: {hard_metrics['ROC_AUC']}")
 
 # ── Cell 8 ── Build & evaluate Soft Voting Classifier ──────────────────────
 print(f"\n{'=' * 55}")
@@ -132,10 +138,11 @@ voting_soft = VotingClassifier(
     voting="soft",
     n_jobs=-1,
 )
+start = time.time()
 voting_soft.fit(X_train, y_train)
+print(f"  Fit time: {time.time() - start:.0f}s")
 soft_metrics = evaluate_model(voting_soft, X_test, y_test, "Voting_Soft")
-print(f"  F1 Weighted: {soft_metrics['F1_Weighted']}")
-print(f"  ROC AUC    : {soft_metrics['ROC_AUC']}")
+print(f"  F1 Weighted: {soft_metrics['F1_Weighted']}  |  ROC AUC: {soft_metrics['ROC_AUC']}")
 
 # ── Cell 9 ── Save voting classifiers ──────────────────────────────────────
 joblib.dump(voting_hard, os.path.join(MODELS_DIR, "voting_hard.pkl"))
