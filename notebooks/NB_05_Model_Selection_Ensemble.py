@@ -50,27 +50,35 @@ print(f"X_train (pre-SMOTE): {X_train.shape}  dtype: {X_train.dtype}")
 print(f"X_test:              {X_test.shape}   dtype: {X_test.dtype}")
 
 # ── Cell 4 ── Load results and rank models ───────────────────────────────────
-# Prefer tuned results (NB-04); fall back to baseline results if NB-04 was
-# skipped, so this notebook remains runnable in isolation.
+# Set USE_TUNED = False to force baseline models even if tuned_results.csv
+# exists on Drive (e.g. when NB-04 cannot be re-run after NB-03 was updated).
+USE_TUNED = False   # ← change to True only if NB-04 was run in this session
+
 tuned_csv    = os.path.join(RESULTS_DIR, "tuned_results.csv")
 baseline_csv = os.path.join(RESULTS_DIR, "baseline_results.csv")
 
-if os.path.exists(tuned_csv):
-    results_df   = pd.read_csv(tuned_csv)
+if USE_TUNED and os.path.exists(tuned_csv):
+    results_df    = pd.read_csv(tuned_csv)
     models_subdir = "tuned"
     results_stage = "tuned"
     print(f"\nUsing tuned results ({len(results_df)} models).")
 else:
-    results_df   = pd.read_csv(baseline_csv)
+    results_df    = pd.read_csv(baseline_csv)
     models_subdir = "baseline"
     results_stage = "baseline"
-    print(f"\n[WARN] tuned_results.csv not found — falling back to baseline results "
-          f"({len(results_df)} models). Run NB-04 to generate tuned models.")
+    if USE_TUNED:
+        print("[WARN] USE_TUNED=True but tuned_results.csv not found — using baseline.")
+    else:
+        print("Using baseline results (USE_TUNED=False).")
 
-results_df = results_df.sort_values("F1_Weighted", ascending=False).reset_index(drop=True)
+# Sort by ROC_AUC — honest metric under class imbalance.
+# F1_Weighted can be >0.98 for a model that always predicts "No Sepsis"
+# (because No Sepsis makes up ~98% of samples and dominates the weighted avg).
+# ROC_AUC is threshold-independent and not distorted by class frequency.
+results_df = results_df.sort_values("ROC_AUC", ascending=False).reset_index(drop=True)
 
-print("\nModel rankings:")
-print(results_df[["Model", "F1_Weighted", "ROC_AUC"]].to_string(index=False))
+print("\nModel rankings (by ROC_AUC):")
+print(results_df[["Model", "ROC_AUC", "F1_Weighted"]].to_string(index=False))
 
 # ── Cell 5 ── Select top 3 models ──────────────────────────────────────────
 top3_names = results_df["Model"].head(3).tolist()
@@ -222,7 +230,7 @@ ensemble_results.append({
 })
 
 ensemble_df = pd.DataFrame(ensemble_results)
-ensemble_df = ensemble_df.sort_values("F1_Weighted", ascending=False).reset_index(drop=True)
+ensemble_df = ensemble_df.sort_values("ROC_AUC", ascending=False).reset_index(drop=True)
 
 print("\n" + "=" * 70)
 print("ENSEMBLE COMPARISON")

@@ -53,25 +53,47 @@ from lightgbm import LGBMClassifier
 from xgboost import XGBClassifier
 from catboost import CatBoostClassifier
 
+# Compute class imbalance ratio.  XGBoost uses a numeric scale_pos_weight
+# (= n_negative / n_positive) instead of the string 'balanced'.
+_neg = int((y_train == 0).sum())
+_pos = int((y_train == 1).sum())
+_spw = round(_neg / _pos, 2)           # scale_pos_weight for XGBoost
+print(f"Class counts — neg: {_neg:,}  pos: {_pos:,}  ratio: {_spw:.1f}x")
+
+# class_weight='balanced' tells sklearn to weight each sample by
+#   n_samples / (n_classes * class_count)
+# so the minority class gets ~49× more influence per sample on this dataset.
+# Models that do NOT support class_weight (KNN, MLP, AdaBoost, Bagging,
+# GradientBoosting) receive no parameter — SMOTE in NB-04 handles them.
+
 # Linear SVM via SGD — orders of magnitude faster than SVC(kernel='rbf')
 # CalibratedClassifierCV adds predict_proba support needed for ROC-AUC
 _svm_base = SGDClassifier(loss="hinge", max_iter=1000, tol=1e-3,
+                          class_weight="balanced",
                           random_state=42, n_jobs=-1)
 
 models = {
     "MLP":                  MLPClassifier(max_iter=300, random_state=42),
     "KNN":                  KNeighborsClassifier(),
-    "DecisionTree":         DecisionTreeClassifier(random_state=42),
+    "DecisionTree":         DecisionTreeClassifier(class_weight="balanced",
+                                                   random_state=42),
     "AdaBoost":             AdaBoostClassifier(random_state=42, algorithm="SAMME"),
-    "HistGradientBoosting": HistGradientBoostingClassifier(random_state=42),
-    "RandomForest":         RandomForestClassifier(random_state=42, n_jobs=-1),
+    "HistGradientBoosting": HistGradientBoostingClassifier(class_weight="balanced",
+                                                           random_state=42),
+    "RandomForest":         RandomForestClassifier(class_weight="balanced",
+                                                   random_state=42, n_jobs=-1),
     "Bagging":              BaggingClassifier(random_state=42, n_jobs=-1),
     "GradientBoosting":     GradientBoostingClassifier(random_state=42),
-    "LightGBM":             LGBMClassifier(random_state=42, n_jobs=-1, verbose=-1),
-    "XGBoost":              XGBClassifier(random_state=42, n_jobs=-1,
-                                          use_label_encoder=False, eval_metric="logloss"),
-    "CatBoost":             CatBoostClassifier(random_state=42, verbose=0),
-    "ExtraTrees":           ExtraTreesClassifier(random_state=42, n_jobs=-1),
+    "LightGBM":             LGBMClassifier(class_weight="balanced",
+                                           random_state=42, n_jobs=-1, verbose=-1),
+    "XGBoost":              XGBClassifier(scale_pos_weight=_spw,
+                                          random_state=42, n_jobs=-1,
+                                          use_label_encoder=False,
+                                          eval_metric="logloss"),
+    "CatBoost":             CatBoostClassifier(auto_class_weights="Balanced",
+                                               random_state=42, verbose=0),
+    "ExtraTrees":           ExtraTreesClassifier(class_weight="balanced",
+                                                 random_state=42, n_jobs=-1),
     "SVM":                  CalibratedClassifierCV(_svm_base, cv=3),
 }
 
