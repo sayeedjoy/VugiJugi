@@ -4,6 +4,13 @@
 # Goal: Produce all thesis-ready outputs for the best model(s).
 #       This notebook is self-contained — it reloads everything from
 #       saved files and does NOT re-train any models.
+#
+# NB-04 skip-safe: the final summary table omits the "Tuned" stage if
+# tuned_results.csv does not exist (because NB-04 was skipped).
+#
+# Pipeline-aware: NB-04 saves models as imblearn.Pipeline([SMOTE, model]).
+# Feature importance extraction drills into named_steps["model"] to reach
+# the actual estimator inside the pipeline wrapper.
 # =============================================================================
 
 # ── Cell 1 ── Install dependencies ──────────────────────────────────────────
@@ -19,6 +26,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+from sklearn.pipeline import Pipeline as SklearnPipeline
 from sklearn.metrics import (
     classification_report,
     confusion_matrix,
@@ -53,14 +61,16 @@ FIGURES_DIR = os.path.join(THESIS_DIR, "figures")
 os.makedirs(FIGURES_DIR, exist_ok=True)
 
 # ── Cell 3 ── Load test data and models ─────────────────────────────────────
-X_test = np.load(os.path.join(DATA_DIR, "X_test.npy"))
+# Cast to float32 to match training dtype used in NB-04 (avoids silent
+# dtype-mismatch warnings in sklearn/xgboost at prediction time).
+X_test = np.load(os.path.join(DATA_DIR, "X_test.npy")).astype(np.float32)
 y_test = np.load(os.path.join(DATA_DIR, "y_test.npy"))
 
-scaler       = joblib.load(os.path.join(MODELS_DIR, "scaler.pkl"))
-voting_hard  = joblib.load(os.path.join(MODELS_DIR, "voting_hard.pkl"))
-voting_soft  = joblib.load(os.path.join(MODELS_DIR, "voting_soft.pkl"))
+scaler      = joblib.load(os.path.join(MODELS_DIR, "scaler.pkl"))
+voting_hard = joblib.load(os.path.join(MODELS_DIR, "voting_hard.pkl"))
+voting_soft = joblib.load(os.path.join(MODELS_DIR, "voting_soft.pkl"))
 
-print(f"X_test: {X_test.shape}  y_test: {y_test.shape}")
+print(f"X_test: {X_test.shape}  dtype: {X_test.dtype}")
 print(f"Models loaded: voting_hard, voting_soft, scaler")
 
 # Load feature names
@@ -71,14 +81,8 @@ else:
     feature_names = [f"Feature_{i}" for i in range(X_test.shape[1])]
 
 # ── Cell 4 ── Determine best model ─────────────────────────────────────────
-# Evaluate both voting classifiers and use the better one as the "best"
-def quick_eval(model, X, y, label):
-    y_pred = model.predict(X)
-    f1 = f1_score(y, y_pred, average="weighted", zero_division=0)
-    return f1
-
-f1_hard = quick_eval(voting_hard, X_test, y_test, "Hard")
-f1_soft = quick_eval(voting_soft, X_test, y_test, "Soft")
+f1_hard = f1_score(y_test, voting_hard.predict(X_test), average="weighted", zero_division=0)
+f1_soft = f1_score(y_test, voting_soft.predict(X_test), average="weighted", zero_division=0)
 print(f"\nVoting Hard F1: {f1_hard:.4f}")
 print(f"Voting Soft F1: {f1_soft:.4f}")
 
@@ -120,7 +124,7 @@ plt.tight_layout()
 cm_path = os.path.join(FIGURES_DIR, "confusion_matrix.png")
 plt.savefig(cm_path, dpi=300, bbox_inches="tight")
 plt.show()
-print(f"✓ Saved → {cm_path}")
+print(f"Saved → {cm_path}")
 
 # ── Cell 7 ── ROC curve ────────────────────────────────────────────────────
 if y_prob is not None:
@@ -142,9 +146,9 @@ if y_prob is not None:
     roc_path = os.path.join(FIGURES_DIR, "roc_curve.png")
     plt.savefig(roc_path, dpi=300, bbox_inches="tight")
     plt.show()
-    print(f"✓ Saved → {roc_path}")
+    print(f"Saved → {roc_path}")
 else:
-    print("⚠ ROC curve skipped — model does not support predict_proba.")
+    print("WARN: ROC curve skipped — model does not support predict_proba.")
 
 # ── Cell 8 ── Precision-Recall curve ───────────────────────────────────────
 if y_prob is not None:
@@ -163,43 +167,52 @@ if y_prob is not None:
     pr_path = os.path.join(FIGURES_DIR, "pr_curve.png")
     plt.savefig(pr_path, dpi=300, bbox_inches="tight")
     plt.show()
-    print(f"✓ Saved → {pr_path}")
+    print(f"Saved → {pr_path}")
 else:
-    print("⚠ PR curve skipped — model does not support predict_proba.")
+    print("WARN: PR curve skipped — model does not support predict_proba.")
 
 # ── Cell 9 ── Feature importance (aggregate from tree-based estimators) ──────
+# NB-04 models are imblearn.Pipeline([SMOTE, model]). VotingClassifier stores
+# them in .estimators_ as fitted copies. We must unwrap the pipeline to reach
+# the actual model via named_steps["model"]; plain (non-pipeline) models are
+# accessed directly. Both cases are handled below.
 print("\n" + "=" * 70)
 print("FEATURE IMPORTANCE (from tree-based ensemble members)")
 print("=" * 70)
 
 importances_sum = np.zeros(X_test.shape[1])
-n_tree_models = 0
+n_tree_models   = 0
 
-# Access individual estimators from the voting classifier
-estimators = (best_model.estimators_ if hasattr(best_model, "estimators_")
-              else [])
+estimators = getattr(best_model, "estimators_", [])
 
 for est in estimators:
-    if hasattr(est, "feature_importances_"):
-        importances_sum += est.feature_importances_
-        n_tree_models += 1
+    # Unwrap imblearn/sklearn Pipeline to reach the underlying classifier.
+    inner = est
+    if hasattr(est, "named_steps") and "model" in est.named_steps:
+        inner = est.named_steps["model"]
+    elif isinstance(est, SklearnPipeline):
+        # Fallback: last step of any sklearn Pipeline
+        inner = est.steps[-1][1]
+
+    if hasattr(inner, "feature_importances_"):
+        importances_sum += inner.feature_importances_
+        n_tree_models   += 1
 
 if n_tree_models > 0:
     avg_importance = importances_sum / n_tree_models
     fi_df = pd.DataFrame({
-        "Feature": feature_names[:len(avg_importance)],
+        "Feature":    feature_names[:len(avg_importance)],
         "Importance": avg_importance,
     }).sort_values("Importance", ascending=False)
 
     print(fi_df.head(15).to_string(index=False))
 
-    # Plot top 15
-    top_n = min(15, len(fi_df))
+    top_n   = min(15, len(fi_df))
     plot_df = fi_df.head(top_n).sort_values("Importance")
 
     fig, ax = plt.subplots(figsize=(8, 6))
-    bars = ax.barh(plot_df["Feature"], plot_df["Importance"],
-                   color=plt.cm.viridis(np.linspace(0.3, 0.9, top_n)))
+    ax.barh(plot_df["Feature"], plot_df["Importance"],
+            color=plt.cm.viridis(np.linspace(0.3, 0.9, top_n)))
     ax.set_xlabel("Average Feature Importance")
     ax.set_title(f"Top {top_n} Feature Importances (Ensemble)")
     ax.grid(True, axis="x", alpha=0.3)
@@ -207,45 +220,51 @@ if n_tree_models > 0:
     fi_path = os.path.join(FIGURES_DIR, "feature_importance.png")
     plt.savefig(fi_path, dpi=300, bbox_inches="tight")
     plt.show()
-    print(f"✓ Saved → {fi_path}")
+    print(f"Saved → {fi_path}")
 else:
-    print("⚠ No tree-based estimators found in the ensemble — skipping.")
+    print("WARN: No tree-based estimators found in the ensemble — skipping.")
 
-# ── Cell 10 ── Final summary table (all 13 baseline → tuned → ensemble) ────
+# ── Cell 10 ── Final summary table (baseline → tuned [if run] → ensemble) ──
+# The tuned stage is included only if NB-04 was run and produced its CSV.
+# This keeps the table accurate when NB-04 was intentionally skipped.
 print("\n" + "=" * 80)
 print("FINAL SUMMARY TABLE")
 print("=" * 80)
 
 summary_rows = []
 
-# Baseline results
-baseline_df = pd.read_csv(os.path.join(RESULTS_DIR, "baseline_results.csv"))
+baseline_csv = os.path.join(RESULTS_DIR, "baseline_results.csv")
+tuned_csv    = os.path.join(RESULTS_DIR, "tuned_results.csv")
+ensemble_csv = os.path.join(RESULTS_DIR, "ensemble_results.csv")
+
+baseline_df = pd.read_csv(baseline_csv)
 for _, row in baseline_df.iterrows():
     summary_rows.append({
-        "Model": row["Model"],
-        "Stage": "Baseline",
+        "Model":       row["Model"],
+        "Stage":       "Baseline",
         "F1_Weighted": row["F1_Weighted"],
-        "ROC_AUC": row["ROC_AUC"],
+        "ROC_AUC":     row["ROC_AUC"],
     })
 
-# Tuned results
-tuned_df = pd.read_csv(os.path.join(RESULTS_DIR, "tuned_results.csv"))
-for _, row in tuned_df.iterrows():
-    summary_rows.append({
-        "Model": row["Model"],
-        "Stage": "Tuned",
-        "F1_Weighted": row["F1_Weighted"],
-        "ROC_AUC": row["ROC_AUC"],
-    })
+if os.path.exists(tuned_csv):
+    tuned_df = pd.read_csv(tuned_csv)
+    for _, row in tuned_df.iterrows():
+        summary_rows.append({
+            "Model":       row["Model"],
+            "Stage":       "Tuned",
+            "F1_Weighted": row["F1_Weighted"],
+            "ROC_AUC":     row["ROC_AUC"],
+        })
+else:
+    print("NOTE: tuned_results.csv not found — Tuned stage omitted from summary.")
 
-# Ensemble results
-ensemble_df = pd.read_csv(os.path.join(RESULTS_DIR, "ensemble_results.csv"))
+ensemble_df = pd.read_csv(ensemble_csv)
 for _, row in ensemble_df.iterrows():
     summary_rows.append({
-        "Model": row["Model"],
-        "Stage": "Ensemble",
+        "Model":       row["Model"],
+        "Stage":       "Ensemble",
         "F1_Weighted": row["F1_Weighted"],
-        "ROC_AUC": row.get("ROC_AUC"),
+        "ROC_AUC":     row.get("ROC_AUC"),
     })
 
 final_df = pd.DataFrame(summary_rows)
@@ -257,6 +276,6 @@ print(final_df.to_string(index=False))
 final_csv = os.path.join(RESULTS_DIR, "final_summary.csv")
 final_df.to_csv(final_csv, index=False)
 
-print(f"\n✅ Saved final summary → {final_csv}")
+print(f"\nSaved final summary → {final_csv}")
 print(f"\nAll figures saved to: {FIGURES_DIR}/")
-print("Done! 🎉")
+print("Done!")

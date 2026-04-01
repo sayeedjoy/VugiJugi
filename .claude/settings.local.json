@@ -1,10 +1,11 @@
 {
-  "enabledPlugins": {
-    "superpowers@claude-plugins-official": true
-  },
   "permissions": {
     "allow": [
-      "Bash(find C:UsersUserDownloadsVugiJugi -type f -name *.csv)"
+      "Bash(find C:UsersUserDownloadsVugiJugi -type f -name *.csv)",
+      "Bash(python -c \"import nbformat; print\\(nbformat.__version__\\)\")"
     ]
+  },
+  "enabledPlugins": {
+    "superpowers@claude-plugins-official": true
   }
 }
